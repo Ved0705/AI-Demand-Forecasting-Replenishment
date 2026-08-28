@@ -13,7 +13,7 @@ prescriptive replenishment engine and a tool-using analytics agent.
 |---|---|---|
 | 1 | Data foundation, ingestion, quality checks | **Code complete — awaiting M5 download** |
 | 2 | SQL layer & business analytics | **Code complete — run `python -m src.sql_runner`** |
-| 3 | EDA & statistics | Not started |
+| 3 | EDA & statistics | **Code complete — run `python -m src.phase3_analysis`** |
 | 4 | Backtesting framework | Contract fixed in config (D-007) |
 | 5 | Forecasting models & error analysis | Not started |
 | 6 | Risk & replenishment engine | Assumptions recorded (D-004) |
@@ -76,6 +76,16 @@ Creates the analytical views, runs 12 reconciliation checks, and writes
 `reports/phase2/`. Export is blocked if validation fails. KPI definitions are
 in [`docs/sql_kpis.md`](docs/sql_kpis.md).
 
+### Run the Phase 3 statistical analysis
+
+```bash
+python -m src.profile          # must run first: Phase 3 reuses its segmentation
+python -m src.phase3_analysis
+```
+
+Writes `reports/phase3/` — EDA report, test register, forecasting implications
+and figures.
+
 ---
 
 ## Ground rules
@@ -118,6 +128,8 @@ src/
   quality.py          data-quality checks that fail loudly
   profile.py          dataset profiling & demand segmentation
   sql_runner.py       named-query registry, validation, report export
+  stats_utils.py      bootstrap, effect sizes, FDR correction
+  phase3_analysis.py  EDA + statistical analysis + figures
   make_fixture.py     synthetic M5-shaped fixture (TESTS ONLY)
 tests/                pytest suite
 reports/              generated profiles and results
