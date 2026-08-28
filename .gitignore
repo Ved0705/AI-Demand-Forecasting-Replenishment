@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Data
+data/raw/
+data/processed/
+data/fixture/
+
+# Generated reports
+reports/
+
+# Databases
+*.duckdb
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.env

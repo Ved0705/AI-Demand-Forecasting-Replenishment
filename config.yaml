@@ -1,0 +1,81 @@
+# =============================================================================
+# Demand Forecasting & Intelligent Replenishment System
+# Central configuration. Nothing important should be hardcoded in src/.
+# =============================================================================
+
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  reports: reports
+  duckdb: data/processed/retail.duckdb
+
+# -----------------------------------------------------------------------------
+# DATA SOURCE
+# M5 files expected in paths.raw (download from Kaggle m5-forecasting-accuracy):
+#   calendar.csv
+#   sales_train_evaluation.csv   (d_1 .. d_1941)
+#   sell_prices.csv
+# sales_train_validation.csv (d_1..d_1913) is also accepted as a fallback.
+# -----------------------------------------------------------------------------
+source:
+  sales_file: sales_train_evaluation.csv
+  sales_file_fallback: sales_train_validation.csv
+  calendar_file: calendar.csv
+  prices_file: sell_prices.csv
+
+# -----------------------------------------------------------------------------
+# SUBSET
+# See DECISION_LOG.md D-002 for the rationale.
+# Set stores: null to ingest all 10 stores (heavier, ~59M rows).
+# -----------------------------------------------------------------------------
+subset:
+  stores: ["CA_1", "TX_1", "WI_1"]   # one per state -> preserves SNAP + regional variation
+  categories: null                    # null = all (FOODS, HOBBIES, HOUSEHOLD)
+  departments: null                   # null = all
+  # Optional hard cap for laptop-scale experimentation. null = no cap.
+  max_items_per_store: null
+
+# -----------------------------------------------------------------------------
+# AVAILABILITY / ACTIVE-WINDOW HANDLING
+# M5 leading zeros are usually "not yet listed in store", NOT observed zero demand.
+# See DECISION_LOG.md D-003.
+# -----------------------------------------------------------------------------
+availability:
+  # Method for detecting when a series becomes active:
+  #   "price"       - first week with a non-null sell_price (recommended)
+  #   "first_sale"  - first day with sales > 0
+  #   "none"        - treat all zeros as real demand (not recommended)
+  method: price
+  # Rows before the active start are flagged is_active=False and are excluded
+  # from training/evaluation by default.
+  drop_inactive: true
+
+# -----------------------------------------------------------------------------
+# BACKTESTING (Phase 4 - defined here early so every phase shares one contract)
+# -----------------------------------------------------------------------------
+backtest:
+  horizon_days: 28        # 4-week forecast horizon
+  n_folds: 5
+  step_days: 28           # folds advance by one horizon (non-overlapping test windows)
+  scheme: expanding       # expanding | rolling
+  min_train_days: 730     # >= 2 years so every fold sees full yearly seasonality
+
+# -----------------------------------------------------------------------------
+# DEMAND SEGMENTATION (Phase 5) - Syntetos-Boylan-Croston style thresholds
+# -----------------------------------------------------------------------------
+segmentation:
+  adi_threshold: 1.32     # average demand interval
+  cv2_threshold: 0.49     # squared coefficient of variation of nonzero demand
+
+# -----------------------------------------------------------------------------
+# REPLENISHMENT SIMULATION (Phase 6)
+# EVERY value here is an ASSUMPTION, not an M5 observation. See D-004.
+# -----------------------------------------------------------------------------
+replenishment:
+  lead_time_days: 7
+  service_level: 0.95
+  review_period_days: 7
+  initial_inventory_days_of_cover: 14
+
+random_seed: 42
