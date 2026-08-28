@@ -12,7 +12,7 @@ prescriptive replenishment engine and a tool-using analytics agent.
 | Phase | Component | Status |
 |---|---|---|
 | 1 | Data foundation, ingestion, quality checks | **Code complete — awaiting M5 download** |
-| 2 | SQL layer & business analytics | Not started |
+| 2 | SQL layer & business analytics | **Code complete — run `python -m src.sql_runner`** |
 | 3 | EDA & statistics | Not started |
 | 4 | Backtesting framework | Contract fixed in config (D-007) |
 | 5 | Forecasting models & error analysis | Not started |
@@ -66,6 +66,16 @@ pytest tests/ -q
 Tests run against a synthetic fixture (`src/make_fixture.py`) — no download
 needed. See D-006 on why fixture data is never analysed.
 
+### Run the SQL analytics layer
+
+```bash
+python -m src.sql_runner
+```
+
+Creates the analytical views, runs 12 reconciliation checks, and writes
+`reports/phase2/`. Export is blocked if validation fails. KPI definitions are
+in [`docs/sql_kpis.md`](docs/sql_kpis.md).
+
 ---
 
 ## Ground rules
@@ -92,11 +102,22 @@ These are non-negotiable and are what the project is defending in an interview.
 ```
 config.yaml           all tunable parameters — nothing hardcoded in src/
 DECISION_LOG.md       what / why / alternatives / limitations, per decision
+docs/
+  sql_kpis.md         exact KPI formulas; observed vs derived quantities
+sql/
+  00_views.sql        analytical views (incl. state-aware SNAP resolution)
+  01_data_validation.sql   grain, fan-out and coverage checks
+  02_sales_kpis.sql        volume & revenue KPIs
+  03_store_analysis.sql    store performance, growth, peer comparison
+  04_product_analysis.sql  rankings, decline, volatility, ABC
+  05_demand_trends.sql     rolling windows and trends
+  06_advanced_analytics.sql SNAP, events, price association
 src/
   config.py           config loading and path resolution
   ingest.py           M5 → long format → parquet + DuckDB
   quality.py          data-quality checks that fail loudly
   profile.py          dataset profiling & demand segmentation
+  sql_runner.py       named-query registry, validation, report export
   make_fixture.py     synthetic M5-shaped fixture (TESTS ONLY)
 tests/                pytest suite
 reports/              generated profiles and results
