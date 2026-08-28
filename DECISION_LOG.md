@@ -430,3 +430,196 @@ metric for the business question.
 **Defend it as.** "Every aggregate in the layer reconciles against the fact
 table by an independent path, and report export is blocked if validation fails.
 Join fan-out doesn't announce itself — it just gives you a bigger number."
+
+---
+
+## D-020 — Expanding-window backtesting
+
+**Chose.** Expanding window (grow-forward): all folds share the same
+`train_start`; only `train_end` advances by `step_days` per fold.
+
+**Why.** In an expanding window, each fold is trained on strictly more data
+than the previous one. This matches the production scenario: as time passes
+the model has access to more history. A sliding window (fixed-width) is simpler
+to reason about but makes earlier folds train on less data than production
+models will ever have — it tests a suboptimal configuration.
+
+**Alternatives.** Sliding window (fixed width); blocked time-series CV;
+single train/test split.
+
+**Rejected because.** A single split has high variance (unlucky fold). Blocked
+CV was considered but adds complexity without benefit at this dataset size.
+Sliding window was considered but is harder to justify for a model that will
+always have access to the full history in production.
+
+**Assumptions.** The data distribution does not shift so dramatically over the
+evaluation period that early and late folds are measuring incomparable things.
+M5 spans 2011-2016; some structural breaks exist (SNAP policy) but they are
+captured in the calendar features.
+
+**Limitations.** Expanding window estimates get noisier as folds diverge in
+training size. At 5 folds the variance is meaningful; report fold-by-fold
+numbers alongside the aggregate.
+
+**Defend it as.** "Production models always have access to all historical data,
+so every test fold should also. Expanding window is the honest emulation of
+that — sliding window tests a deliberately impoverished version of the model."
+
+---
+
+## D-021 — 28-day forecast horizon
+
+**Chose.** 28 days (4 weeks) as the primary forecast horizon.
+
+**Why.** Standard replenishment cycles in grocery retail are 4 weeks. Shorter
+horizons (7 days) would make even naive baselines look good. Longer horizons
+(90 days) are dominated by uncertainty the model cannot reduce. 28 days is
+the right commercial target for this problem and matches M5 competition practice.
+
+**Alternatives.** 7-day, 14-day, 56-day, multi-horizon.
+
+**Rejected because.** 7-day is too short to expose the weaknesses of naive
+baselines. 56-day degrades gracefully into the demand signal becoming noise.
+Multi-horizon evaluation is Phase 5 work, not Phase 4 infrastructure.
+
+**Assumptions.** Replenishment decisions are made on a 4-week cycle.
+
+**Defend it as.** "28 days matches the M5 competition horizon, the standard
+retail replenishment cycle, and is short enough that calendar effects
+(seasonality, SNAP) are meaningful but long enough that naive baselines fail."
+
+---
+
+## D-022 — Feature leakage architecture (slice-first)
+
+**Chose.** Every function that computes historical features takes a `cutoff`
+parameter and slices to `date <= cutoff` as its FIRST operation.
+
+**Why.** The most common leakage bug in time-series ML is computing rolling
+windows or lags over the full dataset and then subsetting. The window silently
+reaches into the future. By slicing first, the operation is structurally
+impossible: there are no future rows to read from.
+
+**Alternatives.** Compute globally, then filter features that touch future rows;
+use a flag column to mark training rows; trust the caller.
+
+**Rejected because.** Post-hoc filtering is error-prone: a function that
+computes mean over a grouped window will include future rows before the filter
+reaches them. Trusting the caller is not testable. A flag column requires
+discipline in every consumer — the slice-first approach requires discipline
+in exactly one place (the feature function) and is testable by the adversarial
+test in test_leakage.py.
+
+**Assumptions.** Callers may accidentally pass the full dataset (including
+future rows). The leakage guard must not rely on caller discipline.
+
+**Defend it as.** "The adversarial test in test_leakage.py demonstrates this
+empirically: we mutate post-cutoff values to 7777 and show that every feature
+and forecast is bit-identical to the clean data. If leakage existed, those
+tests would fail."
+
+---
+
+## D-023 — Baseline selection
+
+**Chose.** Five baselines: naive, seasonal naive (7-day), MA7, MA28, zero.
+
+**Why.** These cover the full difficulty spectrum for retail demand:
+  - `naive` is the minimum reasonable forecast.
+  - `seasonal_naive` captures the weekly demand cycle identified in Phase 3.
+  - `ma7` and `ma28` smooth over noise at different scales.
+  - `zero` is the maximum-pessimism baseline; any model that doesn't beat it
+    for intermittent/lumpy series should not be deployed.
+
+Phase 5 models must demonstrate improvement over ALL five baselines,
+not just the weakest one.
+
+**Alternatives.** Exponential smoothing (Holt-Winters), SARIMA, STL decomposition.
+
+**Rejected because.** These are models, not baselines. They belong in Phase 5
+where they can be properly evaluated and compared. A baseline is something
+a junior analyst could implement in an afternoon.
+
+**Defend it as.** "A model that doesn't beat MA28 on a 28-day horizon is not
+worth deploying. The zero baseline is the right floor for intermittent series
+— 91% of series are intermittent or lumpy."
+
+---
+
+## D-024 — Metric selection (WAPE/MAE primary, MAPE not primary)
+
+**Chose.** Primary: MAE and WAPE. Secondary: RMSE, bias. Informational: sMAPE,
+MAPE (where actuals > 0 only).
+
+**Why.** Phase 3 established that 59.9% of series have mean zero-share > 50%.
+MAPE is undefined when the actual is 0, and reporting it only over non-zero
+rows produces a biased view of performance (you're optimizing for the easy part
+of the distribution). WAPE avoids this by weighting by absolute demand volume:
+high-volume series (which are also the commercially important ones) dominate
+appropriately.
+
+**Alternatives.** MAPE, sMAPE, pinball loss (for probabilistic forecasts).
+
+**MAPE rejected as primary because.** Excludes the majority of rows for
+intermittent/lumpy series, producing a metric that describes only the
+non-zero demand subset. That subset is not randomly sampled from the full
+distribution.
+
+**sMAPE rejected as primary because.** The 2/(|y|+|ŷ|) denominator has
+unintuitive behaviour near zero and is not standard in retail forecasting.
+
+**Pinball loss.** Phase 5 work if probabilistic forecasts are added.
+
+**Defend it as.** "WAPE is the industry standard for retail demand forecasting.
+MAE is always defined. MAPE is in the output for completeness but the footnote
+says clearly why it should not be used as a decision metric for this dataset."
+
+---
+
+## D-025 — Segment-level mandatory evaluation
+
+**Chose.** Every metric table is broken out by Phase 1 segment (smooth /
+erratic / intermittent / lumpy). The overall aggregate is never the sole
+reported number.
+
+**Why.** Phase 3 confirmed that smooth and intermittent series have completely
+different demand profiles (Gini = 0.643; 59.9% mean zero-share). A model could
+achieve a good overall MAE by performing well only on smooth (high-volume)
+series while performing no better than zero on intermittent ones. Without
+segment-level reporting, this failure is invisible.
+
+**Alternatives.** Report overall only; report by category; report by store.
+
+**All are reported** (overall, segment, store, category, horizon). But segment
+is the most important because the segment defines the problem type.
+
+**Defend it as.** "A single headline metric hides the model's failure mode.
+The zero baseline achieves WAPE=1.0 for every series by construction. If the
+model only beats zero for smooth series but matches it for intermittent series,
+the overall WAPE might still look good while 91% of the series see no benefit."
+
+---
+
+## D-026 — Known-future feature policy (SNAP and calendar)
+
+**Chose.** SNAP flags, day-of-week, month, year, week-of-year, is_weekend, and
+event flags are classified as `known_future` features. They are never placed in
+`historical_cols`.
+
+**Why.** SNAP (Supplemental Nutrition Assistance Program) disbursement dates
+are published by the US government in advance. They are known at forecast
+creation time for any future date. Treating them as historical features is
+technically wrong: it implies the feature is derived from past sales, which
+would require carry-forward logic at inference time and invite leakage bugs.
+
+Calendar and static metadata features (DOW, month, store_id, cat_id) are
+always known for future dates and require no past sales to compute.
+
+**The `FeatureSet` dataclass** makes this distinction explicit in code. Phase 5
+model code must inspect `FeatureSet.known_future_cols` to confirm it is not
+accidentally using historical features on the forecast horizon.
+
+**Defend it as.** "In production, the model scores on future dates where y is
+unknown. Known-future features are the only safe inputs at inference time beyond
+the model's own carried-forward predictions. Marking them explicitly in the
+FeatureSet prevents a class of leakage bugs from ever reaching production."

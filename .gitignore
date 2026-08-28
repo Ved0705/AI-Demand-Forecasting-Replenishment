@@ -27,3 +27,7 @@ Thumbs.db
 # Secrets
 .env
 *.env
+
+# Scratch / one-off helper scripts
+run_fixture_backtest.py
+regen_report.py

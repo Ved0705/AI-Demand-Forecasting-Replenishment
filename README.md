@@ -86,6 +86,19 @@ python -m src.phase3_analysis
 Writes `reports/phase3/` — EDA report, test register, forecasting implications
 and figures.
 
+### Run the Phase 4 backtest
+
+```bash
+python -m src.profile          # if not already run
+python -m src.backtest         # rolling-origin baseline evaluation
+```
+
+Generates `reports/phase4/` — fold metadata, per-method metrics by segment,
+store, category, and horizon day.  All five baselines (naive, seasonal naive,
+MA7, MA28, zero) are evaluated against 5 expanding-window folds of the real
+M5 data.  Leakage prevention is structurally enforced and adversarially tested
+in `tests/test_leakage.py`.
+
 ---
 
 ## Ground rules
