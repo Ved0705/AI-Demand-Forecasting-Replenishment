@@ -20,22 +20,27 @@ def series_stats(long: pd.DataFrame) -> pd.DataFrame:
     These two are the standard Syntetos-Boylan axes for classifying demand
     into smooth / erratic / intermittent / lumpy.
     """
-    g = long.groupby(["store_id", "item_id"], observed=True)["sales"]
+    keys = ["store_id", "item_id"]
 
+    # Vectorised throughout: groupby.apply would materialise one sub-Series per
+    # series (~9k of them over ~14M rows), which is minutes instead of seconds.
+    g = long.groupby(keys, observed=True)["sales"]
     n_periods = g.size()
-    n_nonzero = g.apply(lambda s: int((s > 0).sum()))
     total = g.sum()
     mean = g.mean()
 
+    nonzero = long.loc[long["sales"] > 0, keys + ["sales"]]
+    gnz = nonzero.groupby(keys, observed=True)["sales"]
+    n_nonzero = gnz.size().reindex(n_periods.index, fill_value=0)
+
+    # cv2 = (std/mean)^2 of NON-ZERO demand sizes. Sample std (ddof=1) is
+    # undefined for a single observation, so those become NaN - correct, since
+    # a series with one sale has no measurable size variability.
+    nz_mean = gnz.mean().reindex(n_periods.index)
+    nz_std = gnz.std().reindex(n_periods.index)
+    cv2 = (nz_std / nz_mean.replace(0, np.nan)) ** 2
+
     adi = n_periods / n_nonzero.replace(0, np.nan)
-
-    def _cv2(s: pd.Series) -> float:
-        nz = s[s > 0]
-        if len(nz) < 2 or nz.mean() == 0:
-            return np.nan
-        return float((nz.std() / nz.mean()) ** 2)
-
-    cv2 = g.apply(_cv2)
 
     return pd.DataFrame(
         {
@@ -53,10 +58,22 @@ def series_stats(long: pd.DataFrame) -> pd.DataFrame:
 def classify_demand(stats: pd.DataFrame, adi_thr: float, cv2_thr: float) -> pd.DataFrame:
     """Syntetos-Boylan-Croston quadrants."""
     out = stats.copy()
+
+    # NaN >= threshold is False, so a series with undefined adi/cv2 (never sold,
+    # or sold exactly once) would otherwise satisfy both "low" conditions and be
+    # labelled 'smooth' - the precise opposite of the truth. Gate on definedness
+    # first so those fall through to 'unknown'.
+    defined = out["adi"].notna() & out["cv2"].notna()
     hi_adi = out["adi"] >= adi_thr
     hi_cv2 = out["cv2"] >= cv2_thr
+
     out["segment"] = np.select(
-        [~hi_adi & ~hi_cv2, ~hi_adi & hi_cv2, hi_adi & ~hi_cv2, hi_adi & hi_cv2],
+        [
+            defined & ~hi_adi & ~hi_cv2,
+            defined & ~hi_adi & hi_cv2,
+            defined & hi_adi & ~hi_cv2,
+            defined & hi_adi & hi_cv2,
+        ],
         ["smooth", "erratic", "intermittent", "lumpy"],
         default="unknown",
     )
@@ -118,3 +135,74 @@ def write_report(prof: dict, path: Path) -> Path:
     )
     path.write_text("\n".join(L))
     return path
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main(config_path: str | None = None) -> None:
+    """Profile the REAL processed M5 data written by `python -m src.ingest`.
+
+    Reads data/processed/sales_long.parquet. Never touches the synthetic
+    fixture - if the parquet is absent this fails with instructions rather
+    than silently falling back to generated data.
+    """
+    import logging
+
+    from src.config import load_config
+    from src.quality import run_checks
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    cfg = load_config(config_path)
+    cfg.ensure_dirs()
+
+    parquet = cfg.path("processed") / "sales_long.parquet"
+    if not parquet.exists():
+        raise SystemExit(
+            f"No processed data at {parquet}.\nRun `python -m src.ingest` first."
+        )
+
+    long = pd.read_parquet(parquet)
+    print(f"Loaded {len(long):,} rows from {parquet.name}")
+
+    prof = profile(
+        long,
+        adi_thr=cfg["segmentation"]["adi_threshold"],
+        cv2_thr=cfg["segmentation"]["cv2_threshold"],
+    )
+
+    reports = cfg.path("reports")
+    written = [write_report(prof, reports / "phase1_profile.md")]
+
+    # Per-series stats are the input to Phase 5 segmentation, so persist them
+    # rather than recomputing later from a different code path.
+    stats_path = reports / "series_stats.csv"
+    prof["series_stats"].to_csv(stats_path, index=False)
+    written.append(stats_path)
+
+    qc = run_checks(long)
+    qc_path = reports / "phase1_quality.md"
+    qc_path.write_text(
+        "# Phase 1 - Data Quality Checks\n\n"
+        f"Overall: {'PASS' if qc.passed else 'FAIL'}\n\n"
+        + qc.to_frame().to_markdown(index=False)
+        + "\n"
+    )
+    written.append(qc_path)
+
+    print(f"\nSeries: {prof['n_series']:,} | Items: {prof['n_items']:,} "
+          f"| Stores: {prof['n_stores']}")
+    print(f"Dates: {prof['date_min'].date()} -> {prof['date_max'].date()}")
+    print(f"Zero-sales share (active rows): {prof['overall_zero_share']:.1%}")
+    print("\nSegments:")
+    print(prof["segments"].to_string(index=False))
+    print("\nQuality:")
+    print(qc)
+    print("\nWritten:")
+    for p in written:
+        print(f"  {p}")
+
+
+if __name__ == "__main__":
+    main()
