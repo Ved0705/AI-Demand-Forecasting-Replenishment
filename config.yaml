@@ -78,4 +78,34 @@ replenishment:
   review_period_days: 7
   initial_inventory_days_of_cover: 14
 
+# -----------------------------------------------------------------------------
+# PRODUCTION FORECASTING & REPLENISHMENT DECISION ENGINE (Phase 6)
+# Every value here is a business/simulation assumption layered on top of the
+# Phase 5 XGBoost forecast, not an M5 observation. See DECISION_LOG D-027+.
+# -----------------------------------------------------------------------------
+phase6:
+  # Where the persisted production model artifact + metadata are stored.
+  model_dir: models
+  model_name: phase6_xgboost_production
+
+  # Safety-stock z-multiplier is derived from replenishment.service_level via
+  # the inverse standard normal CDF (scipy.stats.norm.ppf). Set a number here
+  # only to bypass that derivation with an explicit multiplier. null = derive.
+  safety_stock_z_override: null
+
+  # Demand-uncertainty proxy: per-segment RMSE of the Phase 5 XGBoost backtest
+  # (out-of-sample, never the actuals of the decision being evaluated) is used
+  # as the daily demand-error sigma feeding safety stock. This is a heuristic
+  # risk proxy, NOT a calibrated prediction interval — see phase6 report.
+  risk_source: reports/phase5/segment_model_comparison.csv
+
+  # Fallback sigma (units/day) used only when risk_source is unavailable or a
+  # series' segment has no match. A conservative placeholder, not measured.
+  fallback_sigma: 1.0
+
+  # A forecast is flagged HIGH_FORECAST_OUTLIER if it exceeds this multiple of
+  # the series' own historical mean daily sales (training window). Purely a
+  # review flag; forecasts are never clipped or altered because of it.
+  outlier_forecast_multiplier: 10.0
+
 random_seed: 42

@@ -31,3 +31,5 @@ Thumbs.db
 # Scratch / one-off helper scripts
 run_fixture_backtest.py
 regen_report.py
+# Generated model artifacts
+models/

@@ -623,3 +623,175 @@ accidentally using historical features on the forecast horizon.
 unknown. Known-future features are the only safe inputs at inference time beyond
 the model's own carried-forward predictions. Marking them explicitly in the
 FeatureSet prevents a class of leakage bugs from ever reaching production."
+
+---
+
+## D-027 — Production model reuses the Phase 5 XGBoost architecture unmodified
+
+**Chose.** Phase 6 trains ONE global `GlobalXGBoostForecaster` (unmodified
+class from `src/forecasting_models.py`) on all permitted data up to an
+explicit training cutoff, and persists it (`models/phase6_xgboost_production.json`
++ a metadata sidecar) so subsequent runs reuse it instead of retraining.
+
+**Why.** Phase 5 already ran a fair, leakage-safe, 5-fold comparison and
+selected XGBoost (WAPE 0.776962, see `reports/phase5/model_selection.md`).
+Retuning hyperparameters or changing the architecture for "production" would
+silently invalidate that selection — a different model would be shipped than
+the one that was actually evaluated. Persisting the trained model makes
+repeated Phase 6 runs (forecast-only vs replenishment mode, different
+inventory scenarios) cheap and reproducible without retraining.
+
+**Alternatives.** Retrain from scratch on every run; tune hyperparameters for
+production; train per-series models; use a different global architecture.
+
+**Rejected because.** Per-series models were explicitly rejected in Phase 5
+(9,147 models vs one). Hyperparameter tuning here would mean the shipped
+model was never actually benchmarked against the baselines. Retraining every
+run is wasteful and makes two runs on the same data non-comparable if the
+random seed or environment drifts.
+
+**Assumptions.** The persisted model is only reused if its saved
+`xgboost_params` and `feature_cols` exactly match the current Phase 5
+architecture (`src/phase6_run.py::train_or_load_production_model`);
+otherwise it is retrained automatically and a warning is logged.
+
+**Limitations.** The training cutoff is fixed at persist time. A model
+trained on data through a given date is not automatically refreshed as new
+sales data arrives — `--force-retrain` must be run explicitly (this is a
+deliberate choice: silent retraining would make forecast provenance
+un-auditable).
+
+**Defend it as.** "I didn't get to invent a new production model — Phase 5
+already ran the fair comparison. Phase 6 trains and persists exactly that
+architecture once, with the training cutoff and full hyperparameter set
+written into the report, so every forecast is traceable to a specific model
+artifact."
+
+---
+
+## D-028 — Demand-uncertainty proxy: Phase 5 backtest RMSE by segment
+
+**Chose.** Safety stock uses `z * sigma_daily * sqrt(lead_time_days)`, where
+`sigma_daily` is the per-segment RMSE of the Phase 5 XGBoost backtest
+(`reports/phase5/segment_model_comparison.csv`, averaged across the 5
+out-of-sample folds) and `z` is derived from `replenishment.service_level`
+via `scipy.stats.norm.ppf`.
+
+**Why.** XGBoost's point predictions carry no native uncertainty estimate.
+Fabricating a per-series confidence interval would overstate what the model
+actually provides. The Phase 5 backtest already measured out-of-sample error
+by segment across 5 non-overlapping folds — reusing it as a risk proxy is
+honest about what it is (a historical error magnitude) and what it is not (a
+calibrated prediction interval).
+
+**Alternatives.** Quantile regression / prediction intervals from XGBoost;
+bootstrap the training residuals; assume a fixed CV of demand; no
+uncertainty at all (deterministic reorder point only).
+
+**Rejected because.** Quantile regression means training additional models
+per quantile — out of scope and would compete with the Phase 5 selection.
+Bootstrapping training residuals (in-sample) understates true error, exactly
+the mistake D-022's leakage architecture exists to prevent. No uncertainty at
+all would silently order zero safety stock for every series, which is worse
+than an honest proxy.
+
+**Assumptions.** RMSE approximates the error standard deviation under the
+(measured, not verified further) small-bias condition reported in
+`reports/phase5/phase5_forecasting.md`. Segment-level granularity is coarse
+— sigma is shared by ~thousands of series in the same segment.
+
+**Limitations.** This is explicitly a RISK PROXY, not a calibrated interval.
+No coverage/calibration study has been run. It uses the OUT-OF-SAMPLE Phase 5
+backtest (never the actuals of the specific decision being scored), but it is
+still a historical average, not a per-series or per-date estimate.
+
+**Defend it as.** "I do not claim XGBoost gives me calibrated uncertainty. I
+reused the one thing I actually measured out-of-sample — segment RMSE from
+the Phase 5 backtest — as an ordering signal, and I say explicitly in the
+report and the code that it is a proxy, not a validated interval."
+
+---
+
+## D-029 — Two explicit Phase 6 modes: forecast-only vs replenishment simulation
+
+**Chose.** `src/phase6_run.py --mode forecast-only` produces forecasts and a
+risk summary with no inventory assumption at all. `--mode replenishment`
+additionally requires an inventory position — either supplied via
+`--inventory-csv` (real data) or SIMULATED from
+`replenishment.initial_inventory_days_of_cover` (config assumption) — and
+every replenishment output is labelled as scenario/simulation.
+
+**Why.** M5 has no real inventory, on-hand, or open-purchase-order data
+(D-004). Collapsing "forecast" and "replenishment recommendation" into one
+undifferentiated output would make it easy to present a simulated order
+quantity as if it were a measured business outcome. Splitting the modes
+forces every consumer of `--mode replenishment` output to confront that its
+inventory input is either user-supplied or explicitly simulated.
+
+**Alternatives.** One mode that always simulates inventory silently; require
+real inventory data and refuse to run without it.
+
+**Rejected because.** Silent simulation is exactly the kind of undisclosed
+assumption D-004 was written to prevent. Refusing to run without real
+inventory data would make Phase 6 undemonstrable against the only dataset
+available (M5), which has none.
+
+**Assumptions.** When inventory is simulated, `initial_inventory_days_of_cover`
+(config, currently 14 days) times the forecast daily mean is a reasonable
+starting position for demonstration purposes only.
+
+**Limitations.** No stockout reduction, service-level improvement, or cost
+saving is claimed anywhere in Phase 6 output — there is no real inventory
+ground truth to measure those against.
+
+**Defend it as.** "I built two modes on purpose so nobody could mistake a
+simulated order quantity for a measured result. Forecast-only mode never
+touches inventory assumptions at all; replenishment mode labels every row
+with where its inventory number came from."
+
+---
+
+## D-030 — Genuinely future known-future features sourced from calendar.csv
+
+**Chose.** When the production forecast horizon extends beyond the last date
+present in `sales_long.parquet` (the normal case — the model forecasts the
+28 days after the most recent sales date), known-future calendar columns for
+those dates are filled from `data/raw/calendar.csv` directly, which M5
+publishes 28 days beyond the last day of sales (through 2016-06-19, exactly
+covering the D-021 horizon). If `calendar.csv` is unavailable the columns are
+left NaN and a warning is logged — not fabricated.
+
+**Why.** `sales_long.parquet` only contains rows for dates with a sales
+observation, so `src/features.py::build_fold_features`'s known-future merge
+(designed for Phase 4/5 backtesting, where forecast dates are always
+historical test dates already present in the data) finds no calendar
+columns for a genuinely future production forecast. Without this fallback,
+production forecasting beyond the training data's last date would either
+crash (missing feature columns) or silently train on all-NaN calendar
+features.
+
+**Alternatives.** Restrict Phase 6 to only forecasting within already-observed
+historical dates (as Phase 5 does); hardcode/guess future calendar values;
+require the caller to supply future calendar data.
+
+**Rejected because.** Restricting to historical dates defeats the purpose of
+a *production* forecasting layer. Guessing calendar values (SNAP, events)
+would be a fabrication of exactly the kind D-004 warns against. calendar.csv
+already contains the real published values for exactly this window, so using
+it is not an assumption — it is the correct data source.
+
+**Assumptions.** `calendar.csv`'s SNAP and event columns for the forecast
+window are the actual published values, not placeholders (verified: M5's
+calendar.csv spans 1,969 days = 1,941 sales days + 28 future days).
+
+**Limitations.** If the forecast horizon ever exceeded calendar.csv's
+28-day lookahead, or calendar.csv is not present in `data/raw/`, the
+fallback leaves NaN — XGBoost handles NaN natively in tree splits (see
+`src/forecasting_models.py`), so this degrades gracefully rather than
+crashing, but accuracy for those rows is unverified.
+
+**Defend it as.** "The 28-day M5 calendar lookahead isn't a coincidence — it
+matches the competition's own forecast horizon. I use the real published
+calendar for genuinely future dates rather than reusing Phase 5's
+backtest-only feature path unchanged, and if that file isn't there I leave
+the features as NaN and say so in the log rather than inventing values."

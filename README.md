@@ -14,9 +14,9 @@ prescriptive replenishment engine and a tool-using analytics agent.
 | 1 | Data foundation, ingestion, quality checks | **Code complete — awaiting M5 download** |
 | 2 | SQL layer & business analytics | **Code complete — run `python -m src.sql_runner`** |
 | 3 | EDA & statistics | **Code complete — run `python -m src.phase3_analysis`** |
-| 4 | Backtesting framework | Contract fixed in config (D-007) |
-| 5 | Forecasting models & error analysis | Not started |
-| 6 | Risk & replenishment engine | Assumptions recorded (D-004) |
+| 4 | Backtesting framework | **Code complete — run `python -m src.backtest`** |
+| 5 | Forecasting models & error analysis | **Code complete — XGBoost selected, see `reports/phase5/model_selection.md`** |
+| 6 | Production forecasting & replenishment decision engine | **Code complete — run `python -m src.phase6_run`** |
 | 7 | Retail analytics agent | Not started |
 | 8 | Productionisation & packaging | Not started |
 
@@ -99,6 +99,42 @@ MA7, MA28, zero) are evaluated against 5 expanding-window folds of the real
 M5 data.  Leakage prevention is structurally enforced and adversarially tested
 in `tests/test_leakage.py`.
 
+### Run the Phase 5 forecasting benchmark
+
+```bash
+python -m src.profile          # if not already run
+python -m src.phase5_run       # Croston/SBA/TSB/SES + global XGBoost vs Phase 4 baselines
+```
+
+Generates `reports/phase5/` — model comparison by fold/segment/store/category/
+horizon, plus `model_selection.md`, which selects XGBoost as the primary
+forecasting engine (WAPE 0.776962 across 9,147 series / 5 folds). Leakage is
+adversarially tested end-to-end in `tests/test_leakage_phase5.py`.
+
+### Run Phase 6 — production forecasting & replenishment
+
+```bash
+python -m src.phase6_run --mode forecast-only        # forecast + risk only, no inventory assumption
+python -m src.phase6_run --mode replenishment         # + simulated or supplied inventory decisions
+python -m src.phase6_run --mode replenishment --inventory-csv path/to/inventory.csv
+python -m src.phase6_run --fixture                    # fast fixture smoke test
+python -m src.phase6_run --subset 300                 # quick real-data run on 300 series
+```
+
+Trains (once) and persists the Phase 5 `GlobalXGBoostForecaster` architecture
+unmodified (`models/phase6_xgboost_production.json`) with an explicit training
+cutoff, forecasts the next `backtest.horizon_days` days, and — in
+`replenishment` mode — turns those forecasts into auditable per-series
+recommendations (safety stock, reorder point, recommended order quantity)
+using config-driven business assumptions (`replenishment:` / `phase6:` in
+`config.yaml`). Forecasting (`src/phase6_run.py`) and the replenishment
+decision engine (`src/replenishment.py`) are kept in separate modules.
+
+**M5 has no real inventory data** — replenishment output is always either
+user-supplied or explicitly labelled as a simulation/scenario, never a
+measured outcome. See `reports/phase6/phase6_forecasting.md` and
+DECISION_LOG D-027..D-030 for the full methodology and limitations.
+
 ---
 
 ## Ground rules
@@ -143,9 +179,17 @@ src/
   sql_runner.py       named-query registry, validation, report export
   stats_utils.py      bootstrap, effect sizes, FDR correction
   phase3_analysis.py  EDA + statistical analysis + figures
+  backtest.py          Phase 4 expanding-window backtesting + baselines
+  features.py          Phase 4/5/6 leakage-safe feature engineering
+  forecasting_models.py Phase 5 models (Croston/SBA/TSB/SES + GlobalXGBoostForecaster)
+  model_runner.py       Phase 5 benchmark orchestration
+  phase5_run.py         Phase 5 CLI entrypoint
+  replenishment.py      Phase 6 replenishment DECISION layer (no model code)
+  phase6_run.py         Phase 6 production forecast + CLI orchestration
   make_fixture.py     synthetic M5-shaped fixture (TESTS ONLY)
 tests/                pytest suite
-reports/              generated profiles and results
+models/               persisted Phase 6 production model artifact + metadata
+reports/              generated profiles and results (incl. phase6/)
 ```
 
 ---
