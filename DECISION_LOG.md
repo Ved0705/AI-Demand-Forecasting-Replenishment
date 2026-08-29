@@ -981,3 +981,16 @@ inspection. I fixed the audit trail immediately (two lines, both tested), and
 documented the deeper model-scoping gap explicitly rather than either hiding
 it or attempting a larger fix I hadn't fully reasoned through under time
 pressure."
+
+
+## D-035 — Phase 8 Final Hardening and Documentation
+
+**What.** Finalized the repository for portfolio release, confirming the Phase 7 CLI behavior, generating architecture and reproducibility guides, and overhauling the README without inventing a new web interface.
+
+**Why.** The project must stand on its own technically and communicate its business value defensively. A web UI was rejected because adding FastAPI or React would bloat the project solely for appearance, violating the strict requirement to stay focused on backend data and analytics.
+
+**Alternatives.** Build a Streamlit, Flask, or Next.js web application. Rewriting historical decision logs to appear perfect.
+
+**Rejected because.** Streamlit/Flask are not installed in the environment and are not required to demonstrate the forecasting and SQL logic. Rewriting the DECISION_LOG breaks the honesty of the engineering process; decisions should remain as originally recorded.
+
+**Defend it as.** The repository is a robust data foundation and analytics engine. It ships with a clean JSON CLI that proves the data is accessible and correctly formatted. The focus remained entirely on statistical rigor, SQL quality, and leakage prevention rather than dashboard building.
