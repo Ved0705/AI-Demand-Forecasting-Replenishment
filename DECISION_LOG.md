@@ -795,3 +795,189 @@ matches the competition's own forecast horizon. I use the real published
 calendar for genuinely future dates rather than reusing Phase 5's
 backtest-only feature path unchanged, and if that file isn't there I leave
 the features as NaN and say so in the log rather than inventing values."
+
+---
+
+## D-031 — Phase 7 interface is a CLI, not a web API
+
+**Chose.** `src/phase7_interface.py` exposes `health`, `metadata`, `forecast`,
+`replenishment`, `risk`, and `summary` as `python -m src.phase7_interface`
+subcommands (JSON to stdout), matching the CLI convention every prior phase
+(`ingest`, `sql_runner`, `backtest`, `phase5_run`, `phase6_run`) already uses.
+
+**Why.** FastAPI/uvicorn/pydantic are not installed in this project's
+environment and are not in `requirements.txt`. The Phase 7 brief explicitly
+asks for the *simplest production-appropriate interface supported by the
+existing repository*, and warns against unneeded infrastructure. Adding a
+web framework purely to check an "API" box — with no deployment target, no
+concurrent-client requirement, and no auth/networking need for a local
+portfolio project — would be exactly that.
+
+**Alternatives.** Add fastapi+uvicorn+pydantic to requirements.txt and build
+a real HTTP API; build a minimal API on Python's stdlib `http.server`.
+
+**Rejected because.** A new dependency for a demonstration-only local
+project adds install/maintenance surface with no corresponding benefit —
+every capability the brief asks for (health, metadata, forecast, replenishment,
+risk, summary, validation, controlled errors) is fully expressible as a CLI.
+A hand-rolled stdlib HTTP server would be more code than the CLI for no
+functional gain and would still need the same data-access layer underneath.
+
+**Assumptions.** A future phase that genuinely needs concurrent HTTP clients
+can add FastAPI on top of the existing `Phase7DataStore` without touching its
+interface — the data-access layer is already framework-agnostic.
+
+**Limitations.** No network endpoint exists; a caller must run the CLI from
+this repository's checkout with its `.venv`, not call it over HTTP.
+
+**Defend it as.** "I looked at what was actually installed before assuming a
+framework. The brief said 'simplest interface the repository actually
+supports' — that was a CLI, so that's what I built, and the data layer is
+already separable if an HTTP wrapper is added later."
+
+---
+
+## D-032 — Phase 7 is read-only over precomputed Phase 6 artifacts
+
+**Chose.** `Phase7DataStore` only reads `reports/phase6*/forecast_summary.csv`,
+`risk_summary.csv`, `replenishment_recommendations.csv`, `run_metadata.json`,
+and `models/*_meta.json`. It never imports `xgboost`, `GlobalXGBoostForecaster`,
+or `src.phase6_run`, never calls `build_fold_features`, and never reads
+`sales_long.parquet` or any raw M5 file.
+
+**Why.** The brief is explicit: "Do not duplicate forecasting logic," "Do NOT
+retrain XGBoost on every request," "Do NOT rerun the 28-minute Phase 5
+benchmark," and "Do not load the entire 14M-row dataset for every individual
+API request." The only way to satisfy all four simultaneously is for Phase 7
+to be a pure presentation layer over what Phase 6 already computed and wrote
+to disk.
+
+**Alternatives.** Have the interface call `generate_production_forecast`
+on-demand per request (with model reuse handling caching); have it open the
+DuckDB star schema directly for richer queries.
+
+**Rejected because.** On-demand forecast generation still requires loading
+`sales_long.parquet` (14M rows) and running feature construction per request
+— exactly the cost the brief says to avoid, even with a cached model. Reading
+the DuckDB fact table would reintroduce a whole data-access path Phase 7 has
+no need to own, and blurs the "keep concerns separate" requirement.
+
+**Assumptions.** `python -m src.phase6_run` has already been run at least
+once for the mode/scope being queried (fixture or production); Phase 7
+returns a controlled `DataUnavailableError`, not a crash, when it hasn't.
+
+**Limitations.** Phase 7 can only answer questions about series that were
+actually included in the most recent Phase 6 run's `--subset`/full scope.
+Querying a series outside that scope returns `NotFoundError`, not "compute it
+now" — by design, to avoid an unbounded per-request cost.
+
+**Defend it as.** "Every constraint in the brief points the same direction:
+don't recompute, don't reload the full dataset, don't duplicate the model.
+So Phase 7 is intentionally dumb — it reads three small CSVs and two JSON
+files and formats what's already there."
+
+---
+
+## D-033 — Explanations are prose over existing codes, never fabricated model attribution
+
+**Chose.** `explain_decision()` maps Phase 6's existing `decision_reason`/
+`risk_flag` string constants (imported directly from `src.replenishment`,
+not re-declared) to fixed, human-readable sentences. No SHAP values, feature
+importances, or other model-attribution artifacts are computed or claimed.
+
+**Why.** The brief explicitly forbids fabricating SHAP/feature-importance
+output that wasn't actually computed, and forbids phrasing business-rule
+outcomes ("inventory below reorder point") as model claims ("XGBoost predicts
+a stockout"). XGBoost only ever produces `forecast_units`; everything past
+that (safety stock, reorder point, the recommendation itself) is Phase 6's
+deterministic business logic, and the explanation text says so.
+
+**Alternatives.** Compute real SHAP values per request; omit explanations
+entirely; write natural-language explanations dynamically from the numbers.
+
+**Rejected because.** Computing SHAP per request would mean loading the
+model and its input features per query — the exact cost Phase 7 is built to
+avoid (D-032), and it wasn't part of the Phase 6 selection criteria to begin
+with. Omitting explanations fails the brief's explainability requirement.
+Dynamically generated prose risks silently drifting from what Phase 6
+actually computed; a fixed mapping keyed on the literal codes cannot.
+
+**Assumptions.** The fixed vocabulary in `_REASON_EXPLANATIONS`/
+`_RISK_EXPLANATIONS` stays in lockstep with `src/replenishment.py`'s
+constants because it imports them directly rather than duplicating the
+strings — a renamed/added code either explains correctly or falls back to a
+generic "Decision reason: {code}" string, never a wrong explanation.
+
+**Limitations.** Explanations are template sentences, not per-series
+natural-language generation; they describe the business rule that fired, not
+a numerical breakdown of "why this specific number."
+
+**Defend it as.** "I never say the model predicts a stockout — I say what
+the point forecast was and what business rule fired on top of it, and I
+label that distinction. The explanation text is derived from Phase 6's own
+constants, not duplicated string literals that could drift out of sync."
+
+---
+
+## D-034 — Per-run cutoff (not the persisted model's own cutoff) is authoritative for forecast provenance
+
+**Chose.** `Phase7DataStore.get_forecast` reports `forecast_cutoff_date` from
+`run_metadata.json` (written fresh by every `phase6_run.py` invocation),
+falling back to the model artifact's `training_cutoff` only if run metadata
+is absent. Both `model_trained_cutoff` and a `model_reused_from_different_cutoff`
+boolean are always surfaced.
+
+**Why.** Found during Phase 7 smoke testing: `train_or_load_production_model`
+(Phase 6) can legitimately reuse a persisted model across two runs on
+different data (e.g. the production run's model gets reused for a `--fixture`
+smoke test, since only hyperparameters/features are matched, not the
+underlying dataset — see the `phase6_run.py` reuse path). When that happens,
+the reused model's own `training_cutoff` metadata describes what data the
+*model weights* came from, not what cutoff governed *this run's* feature
+slice and leakage guard. The original Phase 6 code (before this fix) wrote
+`run_metadata["training_cutoff"] = meta.get("training_cutoff")` — the stale,
+reused value — making the audit trail actively wrong for any run that reused
+a model trained on different data.
+
+**Fix scope.** Two lines in `src/phase6_run.py::main()`: `run_metadata`
+now uses the local `cutoff` variable (always accurate to the run that just
+executed) instead of `meta["training_cutoff"]`; the console summary does the
+same and prints a note when the two diverge. `Phase7DataStore.get_forecast`
+prefers `run_metadata`'s cutoff over the model artifact's.
+
+**Alternatives.** Force a retrain whenever the requested cutoff differs from
+the persisted model's (defeats D-027's reuse-for-cheap-reruns rationale);
+silently trust the model artifact's own cutoff (the bug being fixed);
+refuse to reuse a model across datasets at all (a larger redesign of
+Phase 6's persistence key, out of scope for a documentation-and-audit fix).
+
+**Rejected because.** Forcing a retrain on every cutoff mismatch removes the
+whole point of persisting the model (D-027) and would make a fixture smoke
+test as slow as the full production run. Refusing cross-dataset reuse
+entirely is the "correct" long-term fix but requires scoping the model
+artifact key by a data fingerprint — a real design change, not a
+documentation/audit correction, and is called out below as a known
+limitation rather than fixed here.
+
+**Assumptions.** `run_metadata.json` is regenerated by every `phase6_run.py`
+run and is therefore always the authoritative source for "what cutoff did
+THIS forecast use," even when the underlying model artifact is shared.
+
+**Limitations — NOT fixed by this decision.** The deeper issue remains: a
+model trained on production-scale M5 data can be silently reused to score a
+fixture (or any differently-scoped) dataset, because
+`train_or_load_production_model`'s match key is `(xgboost_params,
+feature_cols)` only, with no data-scope/fingerprint component. This is safe
+for reruns on the *same* dataset (the common case) but means a `--fixture`
+or `--subset` run's predictions may come from a model that never saw that
+data's distribution. Scoping the persisted-model key by data (e.g. a hash of
+`(source_parquet_path, subset, cutoff)`) is the correct fix and is left as
+follow-up work, not attempted here to avoid an undemonstrated redesign of
+Phase 6's persistence contract mid-audit.
+
+**Defend it as.** "I found this by actually running the fixture smoke test
+and noticing the reported cutoff didn't match the forecast dates — not by
+inspection. I fixed the audit trail immediately (two lines, both tested), and
+documented the deeper model-scoping gap explicitly rather than either hiding
+it or attempting a larger fix I hadn't fully reasoned through under time
+pressure."

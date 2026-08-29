@@ -507,6 +507,36 @@ def main() -> None:
         )
         recommendations.to_csv(out_dir / "replenishment_recommendations.csv", index=False, encoding="utf-8")
 
+    # Run-level metadata for downstream consumers (Phase 7): makes mode and
+    # inventory provenance queryable without re-parsing the Markdown report.
+    # Purely additive — does not change any existing output's schema.
+    run_metadata = {
+        "mode": args.mode,
+        "inventory_source": (
+            "not_applicable" if args.mode == "forecast-only"
+            else ("user_supplied" if args.inventory_csv else "simulated")
+        ),
+        # NOTE: cutoff (not meta["training_cutoff"]) is used here deliberately.
+        # When a persisted model is reused across runs on different data (see
+        # train_or_load_production_model), meta is the loaded model artifact's
+        # OWN metadata and its training_cutoff reflects whatever data that
+        # model was originally fit on — not necessarily this run's data. The
+        # local `cutoff` variable is always this run's actual feature-slice
+        # cutoff, which is what governs this run's leakage guarantee.
+        "training_cutoff": str(cutoff.date()),
+        "reused_existing_model": meta.get("reused_existing_model"),
+        "xgboost_params": meta.get("xgboost_params"),
+        "feature_cols": meta.get("feature_cols"),
+        "horizon_days": int(cfg["backtest"]["horizon_days"]),
+        "forecast_window": {
+            "start": str(forecast_df["forecast_date"].min().date()) if not forecast_df.empty else None,
+            "end": str(forecast_df["forecast_date"].max().date()) if not forecast_df.empty else None,
+        },
+        "n_series": int(forecast_df[KEY_COLS].drop_duplicates().shape[0]),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (out_dir / "run_metadata.json").write_text(json.dumps(run_metadata, indent=2), encoding="utf-8")
+
     write_phase6_report(
         out_dir / "phase6_forecasting.md", cfg, meta, cutoff, args.mode,
         forecast_df, risk_summary, recommendations,
@@ -514,7 +544,9 @@ def main() -> None:
 
     print("\n=== Phase 6 Complete ===")
     print(f"Mode: {args.mode}")
-    print(f"Training cutoff: {meta.get('training_cutoff')}")
+    print(f"Training cutoff (this run): {run_metadata['training_cutoff']}")
+    if run_metadata["training_cutoff"] != meta.get("training_cutoff"):
+        print(f"  (reused model was originally trained on cutoff: {meta.get('training_cutoff')})")
     print(f"Reused persisted model: {meta.get('reused_existing_model')}")
     print(f"Forecast rows: {len(forecast_df):,}  Series: {forecast_df[KEY_COLS].drop_duplicates().shape[0]:,}")
     if recommendations is not None:

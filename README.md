@@ -17,7 +17,7 @@ prescriptive replenishment engine and a tool-using analytics agent.
 | 4 | Backtesting framework | **Code complete — run `python -m src.backtest`** |
 | 5 | Forecasting models & error analysis | **Code complete — XGBoost selected, see `reports/phase5/model_selection.md`** |
 | 6 | Production forecasting & replenishment decision engine | **Code complete — run `python -m src.phase6_run`** |
-| 7 | Retail analytics agent | Not started |
+| 7 | Retail intelligence interface (CLI over Phase 6) | **Code complete — run `python -m src.phase7_interface`** |
 | 8 | Productionisation & packaging | Not started |
 
 ---
@@ -135,6 +135,28 @@ user-supplied or explicitly labelled as a simulation/scenario, never a
 measured outcome. See `reports/phase6/phase6_forecasting.md` and
 DECISION_LOG D-027..D-030 for the full methodology and limitations.
 
+### Query the system — Phase 7 interface
+
+A read-only CLI over the Phase 6 outputs above — never retrains a model,
+never reloads the full dataset:
+
+```bash
+python -m src.phase7_interface health
+python -m src.phase7_interface metadata
+python -m src.phase7_interface forecast CA_1 FOODS_1_001
+python -m src.phase7_interface replenishment CA_1 FOODS_1_001
+python -m src.phase7_interface risk --top 20 --store CA_1
+python -m src.phase7_interface summary
+python -m src.phase7_interface --fixture summary          # query the fixture run instead
+```
+
+Every command prints JSON and distinguishes FORECAST-ONLY from
+REPLENISHMENT-SIMULATION responses, explains each recommendation in business
+language (never claiming the model itself predicts a stockout), and traces
+every forecast to a model name, training cutoff, and Phase 5 selection
+metric. See `reports/phase7/phase7_interface.md` and DECISION_LOG
+D-031..D-034 for the full interface contract and its known limitations.
+
 ---
 
 ## Ground rules
@@ -186,10 +208,11 @@ src/
   phase5_run.py         Phase 5 CLI entrypoint
   replenishment.py      Phase 6 replenishment DECISION layer (no model code)
   phase6_run.py         Phase 6 production forecast + CLI orchestration
+  phase7_interface.py   Phase 7 read-only CLI over Phase 6 outputs
   make_fixture.py     synthetic M5-shaped fixture (TESTS ONLY)
 tests/                pytest suite
 models/               persisted Phase 6 production model artifact + metadata
-reports/              generated profiles and results (incl. phase6/)
+reports/              generated profiles and results (incl. phase6/, phase7/)
 ```
 
 ---
